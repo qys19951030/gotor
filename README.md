@@ -84,6 +84,7 @@ See [docs/API.md](docs/API.md) for the full request and response contract.
 -socks5-host HOST         Tor SOCKS5 host (default 127.0.0.1)
 -socks5-port PORT         Tor SOCKS5 port (default 9050)
 -disable-socks5           Use a direct connection
+-record-dir DIR           Append crawl records to DIR and resume from them
 -f list|tree|json         CLI output format
 -log-format text|json     Structured log format
 -log-level LEVEL          debug, info, warn, or error
@@ -92,6 +93,12 @@ See [docs/API.md](docs/API.md) for the full request and response contract.
 GoTor skips oversized and non-HTML bodies by default but records those pages
 and the skip reason in the report. Per-page failures are also returned without
 discarding successful results.
+
+With `-record-dir`, every finished page is appended to `records.jsonl` in that
+directory as it completes, so an interrupted crawl keeps its progress on disk.
+Re-running with the same directory skips pages that already succeeded, retries
+the ones that failed, and reports `pagesCrawled`, `pagesSkipped`,
+`historySuccess`, and `historyFailed` alongside the existing report fields.
 
 ## Container
 

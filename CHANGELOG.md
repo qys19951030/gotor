@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refresh discovery (#77).
 - Race-tested coverage for crawler relationships, contact extraction,
   politeness limits, job cancellation, and Tor diagnostics.
+- Append-only crawl journals (`-record-dir` / `recordDir`) that record every
+  finished page as it completes, resume interrupted crawls without refetching
+  succeeded pages, retry failed pages, and report `pagesCrawled`,
+  `pagesSkipped`, `historySuccess`, and `historyFailed` in the shared
+  CLI/HTTP report.
 
 ### Changed
 

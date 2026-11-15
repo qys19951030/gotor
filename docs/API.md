@@ -60,13 +60,21 @@ configuration uses `auto` or a Unix socket.
   "perHostDelayMs": 0,
   "maxResponseBytes": 5242880,
   "allowNonHtml": false,
-  "randomizeHeaders": true
+  "randomizeHeaders": true,
+  "recordDir": "/var/lib/gotor/records"
 }
 ```
 
 Only `url`, `depth`, and `useTor` normally need to be supplied. Proxy and
 crawler controls use safe defaults. A successful request returns `202
 Accepted` and a job snapshot.
+
+When `recordDir` is set, every finished page is appended to
+`records.jsonl` in that directory as one JSON record (`url`, `parentUrl`,
+`depth`, `status`, `durationMs`, `fetchedAt`). A later job with the same
+`recordDir` skips URLs that already succeeded and retries the ones that
+failed. The job fails before crawling if the path is not a directory, the
+record file is not writable, or existing records cannot be parsed.
 
 ## Inspect a job
 
@@ -87,6 +95,10 @@ Completed and cancelled jobs include the available crawl report:
     "usesTor": false,
     "startedAt": "2026-07-17T12:00:00Z",
     "durationMs": 245,
+    "pagesCrawled": 1,
+    "pagesSkipped": 0,
+    "historySuccess": 1,
+    "historyFailed": 0,
     "pages": [
       {
         "depth": 0,
@@ -107,6 +119,10 @@ Completed and cancelled jobs include the available crawl report:
 Each page includes its `parentUrl`, crawl depth, discovered links, metadata,
 email addresses, and phone numbers when available. Skipped binary or oversized
 content includes `skippedReason`. Fetch failures appear in `report.errors`.
+`pagesCrawled` counts pages fetched in this run, `pagesSkipped` counts pages
+skipped because the record directory already contains them, and
+`historySuccess`/`historyFailed` are the cumulative recorded outcomes. The
+CLI prints the same counters from the same report.
 
 ## Cancel a job
 

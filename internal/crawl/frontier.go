@@ -6,20 +6,43 @@ import (
 )
 
 type Frontier struct {
-	ch       chan Task
-	mu       sync.Mutex
-	seen     map[string]struct{}
-	inflight int
-	pending  int
-	closed   bool
-	once     sync.Once
+	ch             chan Task
+	mu             sync.Mutex
+	seen           map[string]struct{}
+	resumed        map[string]struct{}
+	skippedHistory int
+	inflight       int
+	pending        int
+	closed         bool
+	once           sync.Once
 }
 
 func NewFrontier(size int) *Frontier {
 	return &Frontier{
-		ch:   make(chan Task, size),
-		seen: make(map[string]struct{}),
+		ch:      make(chan Task, size),
+		seen:    make(map[string]struct{}),
+		resumed: make(map[string]struct{}),
 	}
+}
+
+// MarkSeen records a URL as already crawled without enqueueing it, so a
+// resumed run dedupes with exactly the same semantics as a fresh run.
+func (f *Frontier) MarkSeen(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.seen[key]; ok {
+		return
+	}
+	f.seen[key] = struct{}{}
+	f.resumed[key] = struct{}{}
+}
+
+// SkippedHistory reports how many distinct URLs were not enqueued because
+// the resumed history already contains them.
+func (f *Frontier) SkippedHistory() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.skippedHistory
 }
 
 func (f *Frontier) EnqueueIfNew(t Task) bool {
@@ -30,6 +53,12 @@ func (f *Frontier) EnqueueIfNew(t Task) bool {
 	}
 	key := t.URL.String()
 	if _, ok := f.seen[key]; ok {
+		if _, ok := f.resumed[key]; ok {
+			// Count each historically crawled URL once, the first time a
+			// link to it is rejected.
+			delete(f.resumed, key)
+			f.skippedHistory++
+		}
 		return false
 	}
 

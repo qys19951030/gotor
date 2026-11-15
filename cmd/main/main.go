@@ -37,6 +37,7 @@ type config struct {
 	maxResponseBytes int64
 	allowNonHTML     bool
 	randomizeHeaders bool
+	recordDir        string
 	serve            bool
 	serverHost       string
 	serverPort       int
@@ -62,6 +63,7 @@ func parseFlags() config {
 	flag.Int64Var(&value.maxResponseBytes, "max-response-bytes", 5*1024*1024, "largest response body to parse")
 	flag.BoolVar(&value.allowNonHTML, "allow-non-html", false, "attempt to parse non-HTML responses")
 	flag.BoolVar(&value.randomizeHeaders, "randomize-headers", false, "rotate browser user-agent headers")
+	flag.StringVar(&value.recordDir, "record-dir", "", "directory for the append-only crawl journal (enables resume)")
 	flag.BoolVar(&value.serve, "s", false, "run the job-control HTTP API")
 	flag.StringVar(&value.serverHost, "server-host", "127.0.0.1", "HTTP API host")
 	flag.IntVar(&value.serverPort, "server-port", 8081, "HTTP API port (0 chooses an available port)")
@@ -148,6 +150,7 @@ func run() error {
 		MaxResponseBytes:  value.maxResponseBytes,
 		AllowNonHTML:      value.allowNonHTML,
 		RandomizeHeaders:  value.randomizeHeaders,
+		RecordDir:         value.recordDir,
 	}
 	report, err := crawl.Execute(ctx, request)
 	if err != nil && !errors.Is(err, context.Canceled) {

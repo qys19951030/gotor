@@ -30,6 +30,8 @@ type Options struct {
 	MaxResponseBytes   int64         // maximum response body read into memory
 	AllowNonHTML       bool          // parse content without an HTML content type
 	RandomizeUserAgent bool          // rotate a small set of browser user agents
+	RecordDir          string        // directory holding the append-only crawl journal
+	JournalFlushEvery  int           // records buffered before each chunk flush
 }
 
 // PageResult is the stable, machine-readable representation of one crawled page.
@@ -52,15 +54,19 @@ type CrawlError struct {
 
 // Report is the versioned response shared by the CLI and HTTP API.
 type Report struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	Engine        string       `json:"engine"`
-	Target        string       `json:"target"`
-	MaxDepth      int          `json:"maxDepth"`
-	UsesTor       bool         `json:"usesTor"`
-	StartedAt     time.Time    `json:"startedAt"`
-	DurationMS    int64        `json:"durationMs"`
-	Pages         []PageResult `json:"pages"`
-	Errors        []CrawlError `json:"errors"`
+	SchemaVersion  int          `json:"schemaVersion"`
+	Engine         string       `json:"engine"`
+	Target         string       `json:"target"`
+	MaxDepth       int          `json:"maxDepth"`
+	UsesTor        bool         `json:"usesTor"`
+	StartedAt      time.Time    `json:"startedAt"`
+	DurationMS     int64        `json:"durationMs"`
+	PagesCrawled   int          `json:"pagesCrawled"`
+	PagesSkipped   int          `json:"pagesSkipped"`
+	HistorySuccess int          `json:"historySuccess"`
+	HistoryFailed  int          `json:"historyFailed"`
+	Pages          []PageResult `json:"pages"`
+	Errors         []CrawlError `json:"errors"`
 }
 
 // Request configures a complete crawl.
@@ -79,6 +85,7 @@ type Request struct {
 	MaxResponseBytes  int64   `json:"maxResponseBytes,omitempty"`
 	AllowNonHTML      bool    `json:"allowNonHtml,omitempty"`
 	RandomizeHeaders  bool    `json:"randomizeHeaders,omitempty"`
+	RecordDir         string  `json:"recordDir,omitempty"`
 }
 
 func (r Request) options() Options {
@@ -120,6 +127,7 @@ func (r Request) options() Options {
 		MaxResponseBytes:   maxResponseBytes,
 		AllowNonHTML:       r.AllowNonHTML,
 		RandomizeUserAgent: r.RandomizeHeaders,
+		RecordDir:          r.RecordDir,
 	}
 }
 
@@ -185,15 +193,28 @@ func Execute(ctx context.Context, request Request) (Report, error) {
 		return report, err
 	}
 
-	if crawler.Seed(request.URL) == 0 {
+	seed, err := url.Parse(request.URL)
+	if err != nil || seed.Host == "" || (seed.Scheme != "http" && seed.Scheme != "https") {
 		return report, &InvalidSeedError{URL: request.URL}
 	}
+	// The seed may already be recorded or re-queued from history, so a
+	// zero here only means there was nothing new to schedule.
+	crawler.Seed(request.URL)
 
-	err = crawler.Run(ctx)
+	runErr := crawler.Run(ctx)
+	closeErr := crawler.Close()
+	stats := crawler.Stats()
 	report.Pages = crawler.Results()
 	report.Errors = crawler.Errors()
+	report.PagesCrawled = stats.PagesCrawled
+	report.PagesSkipped = stats.PagesSkipped
+	report.HistorySuccess = stats.HistorySuccess
+	report.HistoryFailed = stats.HistoryFailed
 	report.DurationMS = time.Since(startedAt).Milliseconds()
-	return report, err
+	if runErr != nil {
+		return report, runErr
+	}
+	return report, closeErr
 }
 
 // InvalidSeedError indicates that the requested root URL is not absolute HTTP(S).

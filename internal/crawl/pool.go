@@ -31,6 +31,23 @@ type Crawler struct {
 	usesTor   bool
 	hostMu    sync.Mutex
 	hostGates map[string]*hostGate
+
+	journal        *Journal
+	historySuccess int
+	historyFailed  int
+	runMu          sync.Mutex
+	runSuccess     int
+	runFailed      int
+}
+
+// Stats summarizes crawl progress for the shared report. History totals
+// are cumulative across every run recorded in the journal, including this
+// one; crawled and skipped counts describe this run only.
+type Stats struct {
+	PagesCrawled   int
+	PagesSkipped   int
+	HistorySuccess int
+	HistoryFailed  int
 }
 
 type hostGate struct {
@@ -97,14 +114,55 @@ func NewCrawler(ctx context.Context, opts Options, useTor bool, socksHost string
 	if err != nil {
 		return nil, err
 	}
-	return &Crawler{
+	crawler := &Crawler{
 		opts:      opts,
 		frontier:  NewFrontier(opts.QueueSize),
 		client:    httpClient,
 		limiter:   rate.NewLimiter(rate.Limit(opts.Rate), opts.Burst),
 		usesTor:   useTor,
 		hostGates: make(map[string]*hostGate),
-	}, nil
+	}
+	if opts.RecordDir != "" {
+		if err := crawler.openJournal(); err != nil {
+			return nil, err
+		}
+	}
+	return crawler, nil
+}
+
+// openJournal prepares the record directory before any page is fetched and
+// backfills the frontier from the recorded history: URLs that already
+// succeeded join the dedup set, failed URLs are queued again at their
+// recorded depth.
+func (c *Crawler) openJournal() error {
+	journal, history, err := OpenJournal(c.opts.RecordDir, c.opts.JournalFlushEvery)
+	if err != nil {
+		return err
+	}
+	c.journal = journal
+	c.historySuccess = history.successTotal
+	c.historyFailed = history.failedTotal
+	for rawURL := range history.succeeded {
+		c.frontier.MarkSeen(rawURL)
+	}
+	for _, record := range history.failed {
+		parsed, err := url.Parse(record.URL)
+		if err != nil {
+			continue
+		}
+		c.frontier.EnqueueIfNew(Task{
+			URL:       parsed,
+			ParentURL: record.ParentURL,
+			Depth:     record.Depth,
+		})
+	}
+	slog.Info("resumed crawl history",
+		"dir", c.opts.RecordDir,
+		"succeeded", len(history.succeeded),
+		"failed", len(history.failed),
+		"sites", len(history.hosts),
+	)
+	return nil
 }
 
 func (c *Crawler) gateFor(host string) *hostGate {
@@ -154,6 +212,7 @@ func (c *Crawler) Run(ctx context.Context) error {
 
 					// track in-flight
 					c.frontier.markStart()
+					startedAt := time.Now()
 					if err := c.process(ctx, t); err != nil {
 						slog.Warn("page crawl failed",
 							"url", t.URL.String(),
@@ -161,6 +220,7 @@ func (c *Crawler) Run(ctx context.Context) error {
 							"error", err,
 						)
 						c.store.addError(t, err)
+						c.recordOutcome(t, RecordStatusFailed, startedAt, err)
 					}
 					c.frontier.markDone()
 				}
@@ -204,6 +264,58 @@ func (c *Crawler) Run(ctx context.Context) error {
 func (c *Crawler) Results() []PageResult {
 	results, _ := c.store.snapshot()
 	return results
+}
+
+// Stats returns the crawl counters backing the shared report, so the CLI
+// and the HTTP API always describe the same run.
+func (c *Crawler) Stats() Stats {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	return Stats{
+		PagesCrawled:   c.runSuccess + c.runFailed,
+		PagesSkipped:   c.frontier.SkippedHistory(),
+		HistorySuccess: c.historySuccess + c.runSuccess,
+		HistoryFailed:  c.historyFailed + c.runFailed,
+	}
+}
+
+// recordOutcome counts the finished page and appends its journal record.
+// A failed write is surfaced as a page-level error instead of silently
+// dropping the record.
+func (c *Crawler) recordOutcome(task Task, status string, startedAt time.Time, cause error) {
+	c.runMu.Lock()
+	if status == RecordStatusSuccess {
+		c.runSuccess++
+	} else {
+		c.runFailed++
+	}
+	c.runMu.Unlock()
+
+	if c.journal == nil {
+		return
+	}
+	record := Record{
+		URL:        task.URL.String(),
+		ParentURL:  task.ParentURL,
+		Depth:      task.Depth,
+		Status:     status,
+		DurationMS: time.Since(startedAt).Milliseconds(),
+		FetchedAt:  startedAt.UTC(),
+	}
+	if cause != nil {
+		record.Error = cause.Error()
+	}
+	if err := c.journal.Append(record); err != nil {
+		c.store.addError(task, fmt.Errorf("write crawl record: %w", err))
+	}
+}
+
+// Close flushes and closes the crawl journal, if one is open.
+func (c *Crawler) Close() error {
+	if c.journal == nil {
+		return nil
+	}
+	return c.journal.Close()
 }
 
 // Errors returns a deterministic snapshot of page-level crawl failures.
@@ -338,6 +450,7 @@ func (c *Crawler) process(ctx context.Context, t Task) error {
 	if skippedReason != "" {
 		c.storeSkippedPage(t, pageMeta, skippedReason)
 		c.logFetch(t, resp, startedAt, skippedReason)
+		c.recordOutcome(t, RecordStatusSuccess, startedAt, nil)
 		return nil
 	}
 
@@ -347,6 +460,7 @@ func (c *Crawler) process(ctx context.Context, t Task) error {
 	}
 	c.store.addResult(pageResult)
 	c.logFetch(t, resp, startedAt, "")
+	c.recordOutcome(t, RecordStatusSuccess, startedAt, nil)
 	c.enqueueChildren(t, links)
 	return nil
 }
